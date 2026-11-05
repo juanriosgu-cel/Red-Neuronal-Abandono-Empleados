@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy
 joblib
-plotly
-scikit-learn
+imbalanced-learn
 tensorflow
 scikit-learn==1.6.1
