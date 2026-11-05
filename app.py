@@ -6,106 +6,63 @@ from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Clasificación del abandono de empleados", page_icon="🧠", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="ACA 2 | Red neuronal para abandono", page_icon="🧠", layout="wide", initial_sidebar_state="expanded")
 BASE = Path(__file__).resolve().parent
 
-CLASSIC = pd.DataFrame([
- {"Modelo":"Random Forest","Accuracy":0.8231,"Precision":0.4468,"Recall":0.4468,"F1":0.4468,"F1 Macro":0.6708,"ROC-AUC":0.7482,"PR-AUC":0.3815,"Tipo":"Clásico · referencia"},
- {"Modelo":"Regresión Logística","Accuracy":0.8605,"Precision":0.6154,"Recall":0.3404,"F1":0.4384,"F1 Macro":0.6794,"ROC-AUC":0.8079,"PR-AUC":0.5716,"Tipo":"Clásico · referencia"},
- {"Modelo":"Árbol de Decisión","Accuracy":0.8163,"Precision":0.4146,"Recall":0.3617,"F1":0.3864,"F1 Macro":0.6392,"ROC-AUC":0.6510,"PR-AUC":0.3444,"Tipo":"Clásico · referencia"},
- {"Modelo":"KNN","Accuracy":0.8537,"Precision":0.6111,"Recall":0.2340,"F1":0.3385,"F1 Macro":0.6281,"ROC-AUC":0.6697,"PR-AUC":0.3407,"Tipo":"Clásico · referencia"},
-])
+@st.cache_resource
+def cargar_red():
+    import tensorflow as tf
+    model_path = BASE / "aca2_red_neuronal.keras"
+    prep_path = BASE / "aca2_preprocesamiento.joblib"
+    meta_candidates = [BASE / "metadatos_aca2.joblib", BASE / "aca2_metadata.joblib"]
+    meta_path = next((p for p in meta_candidates if p.exists()), None)
+    if not model_path.exists(): raise FileNotFoundError(f"No se encontró {model_path.name}")
+    if not prep_path.exists(): raise FileNotFoundError(f"No se encontró {prep_path.name}")
+    if meta_path is None: raise FileNotFoundError("No se encontró metadatos_aca2.joblib ni aca2_metadata.joblib")
+    model = tf.keras.models.load_model(model_path)
+    preprocessor = joblib.load(prep_path)
+    metadata = joblib.load(meta_path)
+    return model, preprocessor, metadata
 
 @st.cache_data
 def cargar_dataset():
-    candidates = [
-        BASE / "WA_Fn-UseC_-HR-Employee-Attrition.csv",
-        BASE / "WA_Fn-UseC_-HR-Employee-Attrition(1).csv",
-    ]
-    csv_path = next((p for p in candidates if p.is_file()), None)
-    if csv_path is None:
-        matches = sorted(p for p in BASE.glob("*.csv") if "Employee-Attrition" in p.name)
-        csv_path = matches[0] if matches else None
-    return pd.read_csv(csv_path) if csv_path else None
+    candidates = [p for p in BASE.glob("*.csv") if "HR-Employee-Attrition" in p.name or "Employee-Attrition" in p.name]
+    if not candidates: return None
+    return pd.read_csv(candidates[0])
 
-@st.cache_resource
-def cargar_artifacts():
-    """Carga artefactos tanto desde artifacts_neural/ como desde la raíz del repositorio."""
-    import tensorflow as tf
+# ACA 1 reference metrics; positive class is Attrition = Yes / Abandonó.
+ACA1 = pd.DataFrame([
+ {"Modelo":"Random Forest (ACA 1)","Accuracy":0.8231,"Precision":0.4468,"Recall":0.4468,"F1":0.4468,"F1 Macro":0.6708,"ROC-AUC":0.7482,"PR-AUC":0.3815},
+ {"Modelo":"Regresión Logística (ACA 1)","Accuracy":0.8605,"Precision":0.6154,"Recall":0.3404,"F1":0.4384,"F1 Macro":0.6794,"ROC-AUC":0.8079,"PR-AUC":0.5716},
+ {"Modelo":"Árbol de Decisión (ACA 1)","Accuracy":0.8163,"Precision":0.4146,"Recall":0.3617,"F1":0.3864,"F1 Macro":0.6392,"ROC-AUC":0.6510,"PR-AUC":0.3444},
+ {"Modelo":"KNN (ACA 1)","Accuracy":0.8537,"Precision":0.6111,"Recall":0.2340,"F1":0.3385,"F1 Macro":0.6281,"ROC-AUC":0.6697,"PR-AUC":0.3407},
+])
 
-    # Preferir la carpeta de artefactos si existe; si no, usar archivos publicados en la raíz.
-    artifact_dir = BASE / "artifacts_neural"
-    root = artifact_dir if artifact_dir.is_dir() else BASE
-
-    metadata_candidates = [root / "metadata.joblib", BASE / "metadata.joblib"]
-    preprocessor_candidates = [root / "preprocessor.joblib", BASE / "preprocessor.joblib"]
-    metrics_candidates = [root / "neural_metrics.joblib", BASE / "neural_metrics.joblib"]
-    details_candidates = [root / "neural_details.joblib", BASE / "neural_details.joblib"]
-
-    def first_existing(paths):
-        return next((p for p in paths if p.is_file()), None)
-
-    meta_path = first_existing(metadata_candidates)
-    prep_path = first_existing(preprocessor_candidates)
-    if meta_path is None or prep_path is None:
-        raise FileNotFoundError(
-            "Faltan metadata.joblib o preprocessor.joblib. "
-            "Deben estar en la raíz del repositorio o en artifacts_neural/."
-        )
-
-    meta = joblib.load(meta_path)
-    prep = joblib.load(prep_path)
-    metrics_path = first_existing(metrics_candidates)
-    details_path = first_existing(details_candidates)
-    metrics = joblib.load(metrics_path) if metrics_path else []
-    details = joblib.load(details_path) if details_path else {}
-
-    models = {}
-    model_files = meta.get("model_files", {})
-
-    # Resolver rutas guardadas en metadata: admite rutas relativas de Colab y archivos en raíz.
-    for model_name, saved_path in model_files.items():
-        saved = Path(str(saved_path))
-        candidates = [
-            saved if saved.is_absolute() else BASE / saved,
-            root / saved.name,
-            BASE / saved.name,
-        ]
-        model_path = first_existing(candidates)
-        if model_path:
-            models[model_name] = tf.keras.models.load_model(model_path)
-
-    # Compatibilidad con el conjunto de artefactos que se subió directamente a GitHub.
-    if not models:
-        model_candidates = [
-            ("MLP", "mlp.keras"),
-            ("Residual MLP", "residual_mlp.keras"),
-            ("Ancho y profundo", "wide_deep.keras"),
-        ]
-        for model_name, filename in model_candidates:
-            model_path = first_existing([root / filename, BASE / filename])
-            if model_path:
-                models[model_name] = tf.keras.models.load_model(model_path)
-
-    if not models:
-        raise FileNotFoundError(
-            "No se encontraron modelos .keras. Se esperaban mlp.keras, "
-            "residual_mlp.keras o wide_deep.keras en la raíz o en artifacts_neural/."
-        )
-
-    return models, prep, meta, metrics, details
-
-st.markdown("<style>.block-container{padding-top:1.4rem;padding-bottom:2rem}h1,h2,h3{letter-spacing:-.02em}</style>",unsafe_allow_html=True)
+st.markdown("""<style>.block-container{padding-top:1.5rem;padding-bottom:2rem}h1,h2,h3{letter-spacing:-.02em}</style>""", unsafe_allow_html=True)
 st.sidebar.title("Navegación")
-pagina=st.sidebar.radio("Seleccione una sección",["Presentación","Análisis exploratorio (EDA)","Clasificación","Redes neuronales","Comparación global","Análisis de desempeño","Predicción individual","Metodología"])
+pagina = st.sidebar.radio("Seleccione una sección", ["Presentación","Análisis exploratorio (EDA)","Resumen","Comparación de modelos","Análisis del modelo","Predicción individual","Metodología"])
 st.sidebar.divider()
-st.sidebar.caption("IBM HR Analytics · Clasificación binaria de Attrition")
-df=cargar_dataset()
+st.sidebar.info("Modelo principal ACA 2: red neuronal MLP. Random Forest y los demás algoritmos aparecen únicamente como referencia del ACA 1.")
 
-if pagina=="Presentación":
-    st.markdown("<div style='padding:2rem;border-radius:18px;background:linear-gradient(125deg,#142d4e,#176b87,#23a6a1);color:white'><div style='font-weight:700;letter-spacing:.12em'>APRENDIZAJE AUTOMÁTICO</div><h1 style='color:white'>Clasificación del abandono de empleados</h1><p>Modelos clásicos y redes neuronales para datos tabulares</p><hr><b>Dataset:</b> IBM HR Analytics — Employee Attrition<br><br><b>Proyecto académico</b><br>Especialización en Inteligencia Artificial</div>",unsafe_allow_html=True)
-    a,b,c=st.columns(3); a.metric("Problema","Clasificación binaria"); b.metric("Clase positiva","Abandonó"); c.metric("Enfoques","ML clásico + redes neuronales")
-    st.write("La aplicación explora el conjunto de datos, compara algoritmos y permite analizar probabilidades estimadas de abandono. Los resultados son descriptivos y académicos.")
+# Load data/model lazily so the EDA and presentation remain accessible even if model artifacts are absent.
+df = cargar_dataset()
+model = preprocessor = metadata = None
+model_error = None
+if pagina in ["Resumen","Comparación de modelos","Análisis del modelo","Predicción individual","Metodología"]:
+    try: model, preprocessor, metadata = cargar_red()
+    except Exception as e: model_error = str(e)
+
+if pagina != "Presentación":
+    st.title("ACA 2 | Predicción del abandono de empleados mediante una red neuronal")
+    st.caption("Especialización en Inteligencia Artificial · Dataset IBM HR Analytics")
+
+if pagina == "Presentación":
+    st.markdown("""<div style='padding:2rem;border-radius:18px;background:linear-gradient(125deg,#142d4e,#176b87,#23a6a1);color:white'><div style='font-weight:700;letter-spacing:.12em'>APRENDIZAJE AUTOMÁTICO</div><h1 style='color:white'>Predicción del abandono de empleados mediante una red neuronal</h1><p>ACA 2 · Especialización en Inteligencia Artificial</p><hr><b>Dataset:</b> IBM HR Analytics — Employee Attrition<br><br><b>Presentado por</b><br>Juan Guillermo Ríos<br>Víctor Rodríguez Polo<br>Michelle Ángel Castillo Mendoza<br><br><b>Docente</b><br>Hamilton Rivera</div>""", unsafe_allow_html=True)
+    a,b,c=st.columns(3)
+    a.markdown("#### Exploración"); a.write("EDA del conjunto de datos y revisión de patrones descriptivos.")
+    b.markdown("#### Red neuronal"); b.write("Modelamiento MLP para estimar la probabilidad de abandono.")
+    c.markdown("#### Evaluación"); c.write("Métricas, análisis de errores y comparación con ACA 1.")
+    st.info("Random Forest y los demás modelos clásicos se conservan como referencia comparativa del ACA 1; las predicciones de esta aplicación se generan con la red neuronal del ACA 2.")
 
 if pagina == "Análisis exploratorio (EDA)":
     st.header("Análisis exploratorio de datos (EDA)")
@@ -271,112 +228,101 @@ if pagina == "Análisis exploratorio (EDA)":
         st.warning("Estos hallazgos describen asociaciones observadas en los datos; no prueban que una variable cause el abandono.")
 
 
-elif pagina in ["Clasificación","Redes neuronales","Comparación global","Análisis de desempeño","Predicción individual","Metodología"]:
-    try:
-        models,preprocessor,metadata,neural_metrics,details=cargar_artifacts()
-    except Exception as e:
-        st.error(f"No fue posible cargar los artefactos del modelo: {e}")
+
+elif pagina in ["Resumen","Comparación de modelos","Análisis del modelo","Predicción individual","Metodología"]:
+    if model_error:
+        st.error("No fue posible cargar los artefactos de la red neuronal: " + model_error)
         st.stop()
 
-    # Normalize exported metric schema into the interface table
-    if isinstance(neural_metrics,dict): neural_metrics=[neural_metrics]
-    neural_rows=[]
-    for r in neural_metrics:
-        neural_rows.append({"Modelo":r.get("Modelo",r.get("name","Red neuronal")),"Accuracy":r.get("Accuracy",np.nan),"Precision":r.get("Precision",r.get("Precision (Abandonó)",np.nan)),"Recall":r.get("Recall",r.get("Recall (Abandonó)",np.nan)),"F1":r.get("F1",r.get("F1 (Abandonó)",np.nan)),"F1 Macro":r.get("F1 Macro",np.nan),"ROC-AUC":r.get("ROC-AUC",np.nan),"PR-AUC":r.get("PR-AUC",r.get("PR-AUC (Average Precision)",np.nan)),"Tipo":"Red neuronal"})
-    neural_df=pd.DataFrame(neural_rows)
-    if neural_df.empty:
-        # Legacy deployment: use saved known evaluation values, clearly marked as MLP result
-        neural_df=pd.DataFrame([{"Modelo":"MLP","Accuracy":0.8061,"Precision":0.4107,"Recall":0.4894,"F1":0.4466,"F1 Macro":0.6645,"ROC-AUC":0.7446,"PR-AUC":0.4886,"Tipo":"Red neuronal · resultado previo"}])
-    global_df=pd.concat([CLASSIC,neural_df],ignore_index=True,sort=False)
-    best_neural=neural_df.sort_values("F1",ascending=False).iloc[0]
-    best_global=global_df.sort_values("F1",ascending=False).iloc[0]
+    # ACA2 metrics may be exported as joblib; otherwise use the observed notebook result supplied for this deployment.
+    metrics_path = BASE / "aca2_metricas.joblib"
+    if metrics_path.exists():
+        metrics = joblib.load(metrics_path)
+    else:
+        metrics = {"Accuracy":0.8061,"Precision (Abandonó)":0.4107,"Recall (Abandonó)":0.4894,"F1 (Abandonó)":0.4466,"ROC-AUC":0.7446,"PR-AUC (Average Precision)":0.4886}
+    mlp_row = {"Modelo":"Red neuronal MLP (ACA 2)","Accuracy":metrics.get("Accuracy",np.nan),"Precision":metrics.get("Precision (Abandonó)",np.nan),"Recall":metrics.get("Recall (Abandonó)",np.nan),"F1":metrics.get("F1 (Abandonó)",np.nan),"F1 Macro":metrics.get("F1 Macro",0.6645),"ROC-AUC":metrics.get("ROC-AUC",np.nan),"PR-AUC":metrics.get("PR-AUC (Average Precision)",np.nan)}
+    comparacion = pd.concat([ACA1,pd.DataFrame([mlp_row])],ignore_index=True)
 
-    if pagina=="Clasificación":
-        st.title("Modelos de clasificación")
-        st.write("Algoritmos clásicos evaluados previamente. Sus resultados se muestran como referencia comparativa; no se cargan aquí como modelos predictivos individuales.")
-        st.dataframe(CLASSIC.drop(columns="Tipo").style.format({c:"{:.4f}" for c in CLASSIC.columns if c not in ["Modelo","Tipo"]}),use_container_width=True,hide_index=True)
-        fig=px.bar(CLASSIC,x="Modelo",y="F1",color="Modelo",text_auto=".4f",title="F1-score · modelos clásicos")
-        fig.update_layout(showlegend=False); st.plotly_chart(fig,use_container_width=True)
+    if pagina == "Resumen":
+        st.header("Resumen del ACA 2")
+        c1,c2,c3=st.columns(3)
+        c1.metric("Modelo implementado","Red neuronal MLP")
+        c2.metric("F1 abandono",f"{mlp_row['F1']:.4f}")
+        c3.metric("Recall abandono",f"{mlp_row['Recall']:.4f}")
+        st.write("La aplicación utiliza una red neuronal MLP para estimar la probabilidad de abandono. La evaluación se complementa con la comparación de los modelos clásicos del ACA 1.")
+        st.dataframe(pd.DataFrame([mlp_row]).style.format({c:"{:.4f}" for c in comparacion.columns if c!="Modelo"}),use_container_width=True,hide_index=True)
+        st.warning("Las predicciones son estimaciones académicas y no deben utilizarse como decisiones automáticas sobre personas.")
 
-    elif pagina=="Redes neuronales":
-        st.title("Redes neuronales")
-        st.write("Comparación de arquitecturas entrenadas con el mismo preprocesamiento y partición de prueba.")
-        st.dataframe(neural_df.drop(columns="Tipo",errors="ignore").style.format({c:"{:.4f}" for c in neural_df.columns if c not in ["Modelo","Tipo"]}),use_container_width=True,hide_index=True)
-        fig=px.bar(neural_df,x="Modelo",y="F1",color="Modelo",text_auto=".4f",title="F1-score de la clase positiva · redes neuronales")
-        fig.update_layout(showlegend=False); st.plotly_chart(fig,use_container_width=True)
-        if details:
-            chosen=st.selectbox("Arquitectura para revisar curvas",list(details.keys()))
-            hist=details[chosen].get("history",{})
-            if "loss" in hist:
-                hdf=pd.DataFrame(hist); hdf.index=hdf.index+1; hdf.index.name="Época"
-                cols=[c for c in ["loss","val_loss"] if c in hdf]
-                if cols: st.plotly_chart(px.line(hdf[cols],title=f"Pérdida de entrenamiento y validación · {chosen}",labels={"value":"Loss","index":"Época"}),use_container_width=True)
-                metric_cols=[c for c in ["accuracy","val_accuracy","auc","val_auc"] if c in hdf]
-                if metric_cols: st.plotly_chart(px.line(hdf[metric_cols],title=f"Métricas por época · {chosen}",labels={"value":"Valor","index":"Época"}),use_container_width=True)
+    elif pagina == "Comparación de modelos":
+        st.header("Comparación de modelos: ACA 1 vs. ACA 2")
+        st.write("Se compara la red neuronal MLP del ACA 2 con los modelos clásicos del ACA 1. La métrica central es el F1-score de la clase positiva «Abandonó».")
+        st.dataframe(comparacion.style.format({c:"{:.4f}" for c in comparacion.columns if c!="Modelo"}),use_container_width=True,hide_index=True)
+        fig=px.bar(comparacion,x="Modelo",y="F1",color="Modelo",title="F1-score de la clase Abandonó: ACA 1 y ACA 2",text_auto=".4f")
+        fig.add_hline(y=0.4468,line_dash="dash",line_color="red",annotation_text="Random Forest ACA 1 = 0.4468")
+        fig.update_layout(showlegend=False,xaxis_tickangle=-25)
+        st.plotly_chart(fig,use_container_width=True)
+        rf_f1=0.4468; delta=mlp_row["F1"]-rf_f1
+        st.metric("Diferencia de F1: MLP vs. Random Forest",f"{delta:+.4f}",f"{delta*100:+.2f} puntos porcentuales")
+        st.markdown(f"**Lectura:** la MLP obtuvo F1 = {mlp_row['F1']:.4f} y Recall = {mlp_row['Recall']:.4f}; Random Forest obtuvo F1 = 0.4468 y Recall = 0.4468. La interpretación debe considerar también Precision y PR-AUC.")
+        st.caption("Nota: la comparación es descriptiva si los modelos no se evaluaron sobre exactamente la misma partición de prueba.")
+        st.download_button("Descargar tabla comparativa CSV",comparacion.to_csv(index=False).encode("utf-8-sig"),"comparacion_aca1_aca2.csv","text/csv")
 
-    elif pagina=="Comparación global":
-        st.title("Comparación global de modelos")
-        st.write("Se contrasta la referencia de modelos clásicos con las arquitecturas neuronales evaluadas. La selección se prioriza por F1 de la clase positiva «Abandonó», considerando Recall y PR-AUC.")
-        st.dataframe(global_df.sort_values("F1",ascending=False).style.format({c:"{:.4f}" for c in global_df.columns if c not in ["Modelo","Tipo"]}),use_container_width=True,hide_index=True)
-        metric=st.selectbox("Métrica para comparar",["F1","Recall","Precision","PR-AUC","ROC-AUC","Accuracy"],index=0)
-        fig=px.bar(global_df,x="Modelo",y=metric,color="Tipo",barmode="group",text_auto=".4f",title=f"Comparación de {metric}")
-        fig.update_layout(xaxis_tickangle=-25); st.plotly_chart(fig,use_container_width=True)
-        a,b=st.columns(2); a.metric("Mejor red neuronal",str(best_neural["Modelo"])); b.metric("Mejor F1 observado",f"{best_global['F1']:.4f}",str(best_global["Modelo"]))
-        st.caption("Los resultados clásicos corresponden a una evaluación previa. La comparación directa es descriptiva si no comparten exactamente la misma partición de prueba.")
-        st.download_button("Descargar comparación CSV",global_df.to_csv(index=False).encode("utf-8-sig"),"comparacion_global_modelos.csv","text/csv")
+    elif pagina == "Análisis del modelo":
+        st.header("Análisis de la red neuronal")
+        st.write("Resultados de evaluación de la MLP para la clase positiva «Abandonó».")
+        cols=st.columns(4)
+        for col,(label,key) in zip(cols,[("Accuracy","Accuracy"),("Precision","Precision (Abandonó)"),("Recall","Recall (Abandonó)"),("F1-score","F1 (Abandonó)")]):
+            val=metrics.get(key)
+            col.metric(label,f"{val:.4f}" if val is not None else "N/D")
+        st.write("ROC-AUC:",f"{metrics.get('ROC-AUC',np.nan):.4f}","· PR-AUC:",f"{metrics.get('PR-AUC (Average Precision)',np.nan):.4f}")
+        st.info("Para mostrar matriz de confusión y curvas ROC/Precision-Recall en esta página, exporta también esos valores o vectores desde el notebook. No se reconstruyen a partir de métricas agregadas.")
 
-    elif pagina=="Análisis de desempeño":
-        st.title("Análisis de desempeño")
-        if not details:
-            st.info("Las matrices y curvas se habilitan al cargar el paquete de artefactos exportado desde el notebook de entrenamiento.")
-        else:
-            chosen=st.selectbox("Modelo neuronal",list(details.keys()))
-            d=details[chosen]
-            cm=np.array(d["confusion_matrix"])
-            fig=px.imshow(cm,text_auto=True,x=["Predijo permanencia","Predijo abandono"],y=["Real permanencia","Real abandono"],color_continuous_scale="Blues",title=f"Matriz de confusión · {chosen}")
-            st.plotly_chart(fig,use_container_width=True)
-            if d.get("roc_fpr") and d.get("roc_tpr"):
-                fig=go.Figure(); fig.add_trace(go.Scatter(x=d["roc_fpr"],y=d["roc_tpr"],mode="lines",name=f"ROC (AUC={float(neural_df.loc[neural_df.Modelo==chosen,'ROC-AUC'].iloc[0]):.3f})")); fig.add_trace(go.Scatter(x=[0,1],y=[0,1],mode="lines",line=dict(dash="dash"),name="Azar")); fig.update_layout(title=f"Curva ROC · {chosen}",xaxis_title="Tasa de falsos positivos",yaxis_title="Tasa de verdaderos positivos"); st.plotly_chart(fig,use_container_width=True)
-            if d.get("pr_recall") and d.get("pr_precision"):
-                fig=go.Figure(); fig.add_trace(go.Scatter(x=d["pr_recall"],y=d["pr_precision"],mode="lines",name="Precision-Recall")); fig.update_layout(title=f"Curva Precision-Recall · {chosen}",xaxis_title="Recall",yaxis_title="Precision"); st.plotly_chart(fig,use_container_width=True)
-
-    elif pagina=="Predicción individual":
-        st.title("Predicción individual")
-        if df is None: st.error("No se encontró el CSV del dataset."); st.stop()
-        chosen=st.selectbox("Red neuronal para la predicción",list(models.keys()),index=list(models.keys()).index(metadata.get("best_neural_model",list(models.keys())[0])) if metadata.get("best_neural_model") in models else 0)
+    elif pagina == "Predicción individual":
+        st.header("Predicción individual con red neuronal MLP")
+        if df is None:
+            st.error("No se encontró el CSV del dataset para construir el formulario.")
+            st.stop()
         input_cols=metadata.get("input_columns",[c for c in df.columns if c!="Attrition"])
-        num_features=metadata.get("numeric_features",[]); cat_features=metadata.get("categorical_features",[])
+        num_features=metadata.get("numeric_features",[])
+        cat_features=metadata.get("categorical_features",[])
         threshold=float(metadata.get("threshold",0.5))
-        defaults={c:(df[c].median() if c in num_features else df[c].mode(dropna=True).iloc[0]) for c in input_cols if c in df.columns}
-        with st.form("individual_prediction"):
-            entered={}; columns=st.columns(2)
+        defaults={c: (df[c].median() if c in num_features else df[c].mode(dropna=True).iloc[0]) for c in input_cols if c in df.columns}
+        with st.form("form_mlp_prediction"):
+            entered={}
+            st.subheader("Características del empleado")
+            cols=st.columns(2)
             for i,c in enumerate(input_cols):
                 if c not in df.columns: continue
-                with columns[i%2]:
+                with cols[i%2]:
                     if c in cat_features or not pd.api.types.is_numeric_dtype(df[c]):
-                        opts=sorted(df[c].dropna().astype(str).unique().tolist()); val=str(defaults[c])
-                        entered[c]=st.selectbox(c,opts,index=opts.index(val) if val in opts else 0)
+                        opts=sorted(df[c].dropna().astype(str).unique().tolist())
+                        entered[c]=st.selectbox(c,opts,index=opts.index(str(defaults[c])) if str(defaults[c]) in opts else 0)
                     else:
                         mn=float(df[c].min()); mx=float(df[c].max()); val=float(defaults[c])
                         entered[c]=st.number_input(c,min_value=mn,max_value=mx,value=min(max(val,mn),mx),step=1.0)
-            submit=st.form_submit_button("Estimar probabilidad",type="primary")
+            submit=st.form_submit_button("Predecir con la red neuronal",type="primary")
         if submit:
             row=pd.DataFrame([entered]).reindex(columns=input_cols)
             for c in cat_features:
                 if c in row: row[c]=row[c].astype(str)
-            x=preprocessor.transform(row)
-            p=float(np.asarray(models[chosen].predict(x,verbose=0)).reshape(-1)[0]); pred=int(p>=threshold)
-            a,b=st.columns(2); a.metric("Probabilidad de abandono",f"{p:.1%}"); b.metric("Probabilidad de permanencia",f"{1-p:.1%}")
-            st.success("Clasificación estimada: posible abandono" if pred else "Clasificación estimada: permanencia")
-            fig=px.bar(x=["Abandono","Permanencia"],y=[p,1-p],title="Probabilidades estimadas",labels={"x":"","y":"Probabilidad"}); fig.update_yaxes(range=[0,1],tickformat=".0%"); st.plotly_chart(fig,use_container_width=True)
-            st.warning("Resultado orientativo académico; no constituye una decisión automática sobre una persona.")
+            transformed=preprocessor.transform(row)
+            probability=float(np.asarray(model.predict(transformed,verbose=0)).reshape(-1)[0])
+            pred=int(probability>=threshold)
+            st.divider(); st.subheader("Resultado de la predicción")
+            if pred: st.error("Clasificación estimada: posible abandono")
+            else: st.success("Clasificación estimada: permanencia")
+            a,b=st.columns(2); a.metric("Probabilidad de abandono",f"{probability:.2%}"); b.metric("Probabilidad de permanencia",f"{1-probability:.2%}")
+            st.caption(f"Umbral de clasificación utilizado: {threshold:.2f}")
+            fig=px.bar(x=["Abandono","Permanencia"],y=[probability,1-probability],labels={"x":"","y":"Probabilidad"},title="Probabilidades estimadas")
+            fig.update_yaxes(range=[0,1],tickformat=".0%"); st.plotly_chart(fig,use_container_width=True)
+            st.warning("Resultado orientativo del modelo; no constituye una decisión automática sobre el empleado.")
 
-    elif pagina=="Metodología":
-        st.title("Metodología")
-        steps=[("1. Exploración","Se examinan estructura, calidad, distribución y relaciones descriptivas del dataset."),("2. Preparación","Se separan variables predictoras y objetivo, y se divide la muestra de forma estratificada."),("3. Preprocesamiento","Las variables numéricas se imputan y escalan; las categóricas se imputan y codifican. El ajuste se realiza solo con entrenamiento."),("4. Modelos clásicos","Se utilizan como referencia comparativa los resultados de Random Forest, Regresión Logística, Árbol de Decisión y KNN."),("5. Redes neuronales","Se comparan MLP, Wide & Deep y Residual MLP sobre datos tabulares."),("6. Evaluación","Se analizan Accuracy, Precision, Recall, F1, F1 Macro, ROC-AUC y PR-AUC, con énfasis en la clase positiva Abandonó."),("7. Selección","Se prioriza F1 de Abandonó, interpretándolo junto con Recall, Precision y PR-AUC."),("8. Despliegue","Streamlit carga los artefactos entrenados y permite consultar métricas, curvas y predicciones sin reentrenar.")]
+    elif pagina == "Metodología":
+        st.header("Metodología de la red neuronal")
+        steps=[("1. Dataset","Se utiliza IBM HR Analytics Employee Attrition, el mismo conjunto de datos del ACA 1."),("2. Exploración","Se revisan estructura, calidad, distribución de la variable objetivo y relaciones descriptivas."),("3. Preprocesamiento","Se imputan y transforman variables numéricas y categóricas con el preprocesador ajustado en entrenamiento."),("4. Arquitectura","Se utiliza una red neuronal MLP con capas densas para aprender patrones no lineales en datos tabulares."),("5. Entrenamiento","La red ajusta sus pesos con los datos de entrenamiento y monitorea validación para controlar el sobreajuste."),("6. Evaluación","Se calculan métricas como Accuracy, Precision, Recall, F1, ROC-AUC y PR-AUC, priorizando la clase Abandonó."),("7. Comparación","Se contrasta la MLP con los modelos clásicos reportados en ACA 1."),("8. Despliegue","Streamlit carga el modelo y artefactos exportados para generar predicciones sin reentrenar en cada sesión.")]
         for title,desc in steps:
             with st.container(border=True): st.subheader(title); st.write(desc)
-        st.warning("Los resultados son estimaciones académicas; no prueban causalidad y no deben utilizarse para decisiones automatizadas de empleo.")
+        st.warning("La aplicación tiene finalidad académica y de apoyo analítico. Las métricas no implican causalidad.")
 
 st.divider()
-st.caption("Clasificación del abandono de empleados · Especialización en Inteligencia Artificial · IBM HR Analytics")
+st.caption("ACA 2 · Especialización en Inteligencia Artificial · Red neuronal MLP para clasificación del abandono de empleados")
